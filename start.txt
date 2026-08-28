@@ -1,0 +1,16 @@
+cd "C:\Users\2000189229\Documents\usecase\clinical-data-review-poc-main"
+$env:JAVA_HOME = "C:\Program Files\OpenLogic\jdk-11.0.19.7-hotspot"
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+$env:SPARK_HOME = "$PWD\.venv\Lib\site-packages\pyspark"
+$env:PYSPARK_PYTHON = "$PWD\.venv\Scripts\python.exe"
+$env:PYSPARK_DRIVER_PYTHON = $env:PYSPARK_PYTHON
+& "$PWD\.venv\Scripts\python.exe" -m streamlit run app.py --server.headless true --server.port 8501
+
+
+
+
+
+
+
+
+
