@@ -47,18 +47,10 @@ def ensure_java_home():
 
 ensure_java_home()
 
-# This project is validated on Python 3.12.x and PySpark 3.5.x.
-# PySpark 3.5 supports Java 11 on Windows, so Java 11 is valid.
-if sys.version_info[:2] != (3, 12):
-    print("ERROR: This project is validated for Python 3.12.x (recommended: 3.12.2).")
+# This project is validated on Python 3.10-3.12 with PySpark 3.5.x.
+if sys.version_info < (3, 10) or sys.version_info >= (3, 13):
+    print("ERROR: Use Python 3.10, 3.11, or 3.12 for this PySpark POC.")
     print("Current interpreter: " + sys.executable)
-    print("PySpark startup can fail on unsupported Windows Python versions.")
-    print()
-    print("Fix:")
-    print("  py -3.12 -m venv .venv")
-    print("  .\\.venv\\Scripts\\python.exe -m pip install -U pip")
-    print("  .\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt")
-    print("  .\\.venv\\Scripts\\python.exe tests/test_quality_checks.py")
     raise SystemExit(2)
 
 # PySpark 3.5 works with Java 11 as well as Java 17.

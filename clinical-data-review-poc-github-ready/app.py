@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import io
+import json
 import os
 import re
 import subprocess
@@ -10,369 +10,334 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+from src.rule_templates import RuleTemplates
+from src.schema_detector import SchemaDetector
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-OUTPUT_DIR = PROJECT_ROOT / "output"
 DATA_DIR = PROJECT_ROOT / "data"
-FLAGGED_DIR = OUTPUT_DIR / "flagged_records"
+OUTPUT_DIR = PROJECT_ROOT / "output"
+CONFIG_DIR = PROJECT_ROOT / "src" / "configurations"
+FLAGGED_CSV = OUTPUT_DIR / "flagged_records" / "flagged_records.csv"
+SUMMARY_CSV = OUTPUT_DIR / "summary_report.csv"
+METADATA_JSON = OUTPUT_DIR / "run_metadata.json"
 
-st.set_page_config(
-    page_title="Clinical Review Command Center",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+CLINICAL_COLUMNS = {
+    "record_id",
+    "patient_id",
+    "source",
+    "field_name",
+    "value",
+    "unit",
+    "expected_unit",
+    "ref_low",
+    "ref_high",
+    "data_received_date",
+}
+
+st.set_page_config(page_title="Healthcare Data Quality Command Center", page_icon="H-DQ", layout="wide")
 
 st.markdown(
     """
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-        :root {
-            --slate-950: #020817;
-            --slate-900: #0f172a;
-            --indigo-600: #4f46e5;
-            --cyan-500: #06b6d4;
-            --emerald-500: #10b981;
-            --amber-500: #f59e0b;
-            --rose-500: #f43f5e;
-            --gray-200: #e2e8f0;
-            --gray-400: #94a3b8;
-        }
-        html, body, [data-testid='stAppViewContainer'] {
-            font-family: 'Inter', sans-serif;
-            background: linear-gradient(135deg, #020817 0%, #0f172a 18%, #111827 40%, #1e293b 100%);
-            color: var(--gray-200);
-        }
-        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
-        [data-testid='stSidebar'] {
-            background: rgba(15, 23, 42, 0.82);
-            border-right: 1px solid rgba(148, 163, 184, 0.25);
-        }
-        .hero {
-            background: linear-gradient(135deg, rgba(79, 70, 229, 0.22), rgba(6, 182, 212, 0.18), rgba(16, 185, 129, 0.18));
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            border-radius: 24px;
-            padding: 1.5rem 1.6rem;
-            box-shadow: 0 20px 35px rgba(15, 23, 42, 0.35);
-            margin-bottom: 1.25rem;
-        }
-        .kpi {
-            background: rgba(15, 23, 42, 0.78);
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 18px;
-            padding: 1rem 1rem 0.8rem;
-            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.25);
-        }
-        .subtle {
-            color: var(--gray-400);
-            font-size: 0.88rem;
-        }
-        .stTabs [role='tablist'] button {
-            font-weight: 600;
-        }
-        .stDataFrame { background: rgba(15, 23, 42, 0.44); }
+      .stApp { background: #f8fafc; color: #0f172a; }
+      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1320px; }
+      [data-testid="stSidebar"] { background: #0f172a; }
+      [data-testid="stSidebar"] * { color: #e2e8f0; }
+      [data-testid="stMetricValue"] { font-size: 1.85rem; color: #0f172a; }
+      .hero {
+        padding: 1.2rem 1.3rem;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #ffffff 0%, #eef6ff 48%, #ecfdf5 100%);
+        margin-bottom: 1rem;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, .06);
+      }
+      .hero h1 { margin: 0; font-size: 2rem; color: #0f172a; }
+      .hero p { margin: .35rem 0 0; color: #334155; }
+      .pill {
+        display: inline-block;
+        padding: .28rem .55rem;
+        border-radius: 999px;
+        background: #dbeafe;
+        color: #1e40af;
+        font-weight: 700;
+        font-size: .78rem;
+        margin-right: .35rem;
+      }
+      .note {
+        border-left: 4px solid #2563eb;
+        padding: .7rem .9rem;
+        background: #eff6ff;
+        color: #1e3a8a;
+        border-radius: 4px;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-SEVERITY_COLORS = {"high": "#f43f5e", "medium": "#f59e0b", "low": "#22c55e", "unknown": "#64748b"}
+
+def safe_filename(name: str) -> str:
+    stem = Path(name).name
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:90] or "uploaded.csv"
 
 
-def list_and_prepare_datasets():
-    files = sorted(DATA_DIR.glob("*.csv")) if DATA_DIR.exists() else []
-    choices = [f.name for f in files]
-    return choices
+def available_datasets() -> list[Path]:
+    DATA_DIR.mkdir(exist_ok=True)
+    return sorted(DATA_DIR.glob("*.csv"))
 
 
-def parse_pipeline_log(log_text: str):
-    match_total = re.search(r"Total records reviewed\s*:\s*(\d+)", log_text)
-    match_flagged = re.search(r"Flagged\s*:\s*(\d+)", log_text)
-    match_clear = re.search(r"Clear\s*:\s*(\d+)", log_text)
-    total = int(match_total.group(1)) if match_total else 0
-    flagged = int(match_flagged.group(1)) if match_flagged else 0
-    clear = int(match_clear.group(1)) if match_clear else max(total - flagged, 0)
-    return {"total": total, "flagged": flagged, "clear": clear}
+def load_preview(path: Path, rows: int = 200) -> pd.DataFrame:
+    return pd.read_csv(path, nrows=rows)
 
 
-def run_pipeline(dataset_path: str):
-    try:
-        env = os.environ.copy()
-        env["PYSPARK_PYTHON"] = sys.executable
-        env["PYSPARK_DRIVER_PYTHON"] = sys.executable
-        env["CLINICAL_DATA_FILE"] = dataset_path
-        env["JAVA_HOME"] = os.environ.get("JAVA_HOME") or r"C:\Program Files\OpenLogic\jdk-11.0.19.7-hotspot"
-        env["PATH"] = os.path.join(env["JAVA_HOME"], "bin") + os.pathsep + env.get("PATH", "")
-
-        process = subprocess.Popen(
-            [sys.executable, "src/main.py"],
-            cwd=str(PROJECT_ROOT),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        output_lines = []
-        if process.stdout is not None:
-            for line in iter(process.stdout.readline, ""):
-                line = line.rstrip()
-                if line:
-                    output_lines.append(line)
-                    yield line
-        return_code = process.wait()
-        yield f"\n[FINAL_EXIT_CODE] {return_code}"
-        yield "\n[PROCESS_COMPLETE]"
-        return return_code, "\n".join(output_lines)
-    except Exception as exc:  # pragma: no cover
-        yield str(exc)
-        return 1, str(exc)
+def looks_clinical(df: pd.DataFrame) -> bool:
+    return CLINICAL_COLUMNS.issubset(set(df.columns))
 
 
-def locate_flagged_csv():
-    csv_dir = OUTPUT_DIR / "flagged_records"
-    files = sorted(csv_dir.glob("*.csv")) if csv_dir.exists() else []
-    return files[-1] if files else None
+def load_outputs() -> tuple[pd.DataFrame, pd.DataFrame]:
+    flagged = pd.read_csv(FLAGGED_CSV) if FLAGGED_CSV.exists() else pd.DataFrame()
+    summary = pd.read_csv(SUMMARY_CSV) if SUMMARY_CSV.exists() else pd.DataFrame()
+    return flagged, summary
 
 
-def load_flagged_data():
-    csv_path = locate_flagged_csv()
-    if csv_path is None:
-        return pd.DataFrame(), None
-    df = pd.read_csv(csv_path)
-    if "severity" not in df.columns:
-        df["severity"] = "unknown"
-    df["severity"] = df["severity"].fillna("unknown").str.lower()
-    return df, csv_path
+def load_metadata() -> dict:
+    if not METADATA_JSON.exists():
+        return {}
+    return json.loads(METADATA_JSON.read_text(encoding="utf-8"))
 
 
-def export_pdf(df: pd.DataFrame, summary: pd.DataFrame, path: str):
-    styles = getSampleStyleSheet()
-    story = []
-    story.append(Paragraph("Clinical Data Review Executive Summary", styles["Title"]))
-    story.append(Spacer(1, 18))
+def detect_domain(df: pd.DataFrame) -> dict:
+    detector = SchemaDetector(df)
+    detector.detect_schema()
+    return detector.classify_domain()
 
-    summary_table = [["Source", "Severity", "Flagged Count"]]
-    for _, row in summary.iterrows():
-        summary_table.append([str(row.get("source", "")), str(row.get("severity", "")), str(row.get("flagged_count", 0))])
 
-    table = Table(summary_table, colWidths=[140, 140, 130])
-    table.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1d4ed8")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.8, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-        ])
+def parse_metrics(log_text: str) -> dict[str, int]:
+    values = {}
+    for key, pattern in {
+        "total": r"Total records reviewed:\s*(\d+)",
+        "flagged": r"Flagged records:\s*(\d+)",
+        "clear": r"Clear records:\s*(\d+)",
+    }.items():
+        match = re.search(pattern, log_text)
+        values[key] = int(match.group(1)) if match else 0
+    return values
+
+
+def write_rules_file(template_id: str) -> Path:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    template = RuleTemplates.get_template(template_id)
+    path = CONFIG_DIR / "active_streamlit_rules.json"
+    path.write_text(json.dumps(template, indent=2), encoding="utf-8")
+    return path
+
+
+def run_review(dataset_path: Path, mode: str, template_id: str) -> tuple[int, str]:
+    env = os.environ.copy()
+    env["PYSPARK_PYTHON"] = sys.executable
+    env["PYSPARK_DRIVER_PYTHON"] = sys.executable
+    env["REVIEW_OUTPUT_DIR"] = str(OUTPUT_DIR)
+
+    cmd = [sys.executable, "src/main.py", "--input", str(dataset_path), "--mode", mode]
+    if mode == "configurable":
+        cmd.extend(["--rules", str(write_rules_file(template_id))])
+
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, text=True, capture_output=True, timeout=420)
+    return result.returncode, (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+
+
+def render_schema_profile(df: pd.DataFrame) -> None:
+    detector = SchemaDetector(df)
+    schema = detector.detect_schema()
+    domain = detector.classify_domain()
+    score_rows = [
+        {
+            "domain": name,
+            "score": details["score"],
+            "matched_signals": ", ".join(details["matched"][:8]),
+        }
+        for name, details in domain["scores"].items()
+    ]
+    st.markdown(
+        f"<span class='pill'>Detected: {domain['domain'].replace('_', ' ').title()}</span>"
+        f"<span class='pill'>Confidence: {domain['confidence']:.0%}</span>",
+        unsafe_allow_html=True,
     )
-    story.append(table)
-    story.append(Spacer(1, 18))
+    st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
 
-    top_rows = df.head(10).copy()
-    if not top_rows.empty:
-        top_rows = top_rows[["record_id", "patient_id", "source", "issue_type", "severity"]].fillna("-")
-        story.append(Paragraph("Priority flagged records", styles["Heading2"]))
-        top_table = [["Record", "Patient", "Source", "Issue", "Severity"]]
-        for _, row in top_rows.iterrows():
-            top_table.append([str(row["record_id"]), str(row["patient_id"]), str(row["source"]), str(row["issue_type"]), str(row["severity"])])
-        top_pdf_table = Table(top_table, colWidths=[65, 80, 65, 150, 70])
-        top_pdf_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7c3aed")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-        ]))
-        story.append(top_pdf_table)
+    profile = pd.DataFrame(
+        [
+            {
+                "column": name,
+                "type": info["inferred_type"],
+                "role": info["semantic_role"],
+                "confidence": round(info["confidence"], 2),
+                "nulls": info["null_count"],
+                "null_pct": round(info["null_ratio"] * 100, 2),
+                "unique": info["unique_count"],
+                "sample": ", ".join(info["sample_values"][:3]),
+            }
+            for name, info in schema.items()
+        ]
+    )
+    st.dataframe(profile, use_container_width=True, hide_index=True)
 
-    doc = SimpleDocTemplate(path, pagesize=A4)
-    doc.build(story)
+    type_counts = profile["type"].value_counts().rename_axis("type").reset_index(name="columns")
+    fig = px.bar(type_counts, x="type", y="columns", title="Detected Column Types", color="type")
+    st.plotly_chart(fig, use_container_width=True)
 
 
-if "pipeline_status" not in st.session_state:
-    st.session_state.pipeline_status = "Ready"
-if "pipeline_log" not in st.session_state:
-    st.session_state.pipeline_log = ""
-if "metrics" not in st.session_state:
-    st.session_state.metrics = {"total": 0, "flagged": 0, "clear": 0}
-if "dataset_name" not in st.session_state:
-    st.session_state.dataset_name = "clinical_records.csv"
+def render_review_dashboard(flagged: pd.DataFrame, summary: pd.DataFrame) -> None:
+    if flagged.empty:
+        st.info("No output yet. Choose a dataset from the sidebar and run the review workflow.")
+        return
 
-available_datasets = list_and_prepare_datasets()
-selected_dataset = st.sidebar.selectbox(
-    "Select a dataset",
-    options=available_datasets if available_datasets else ["clinical_records.csv"],
-    index=available_datasets.index(st.session_state.dataset_name) if st.session_state.dataset_name in available_datasets else 0,
-)
-st.session_state.dataset_name = selected_dataset
+    if "severity" not in flagged.columns:
+        flagged["severity"] = "unknown"
 
-uploaded_file = st.sidebar.file_uploader("Or upload a new clinical dataset", type=["csv"])
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Flagged rows", len(flagged))
+    col2.metric("High priority", int((flagged["severity"].str.lower() == "high").sum()))
+    col3.metric("Issue types", flagged["issue_type"].nunique() if "issue_type" in flagged else 0)
+    col4.metric("Columns reviewed", flagged["issue_column"].nunique() if "issue_column" in flagged else len(flagged.columns))
 
-st.sidebar.markdown("---")
-st.sidebar.caption("Environment")
-st.sidebar.code(f"Python: {sys.executable}\nJava: {os.environ.get('JAVA_HOME') or 'Not set'}")
+    chart_col, table_col = st.columns([1, 1.4])
+    with chart_col:
+        sev = flagged["severity"].fillna("unknown").str.lower().value_counts().rename_axis("severity").reset_index(name="rows")
+        fig = px.pie(sev, names="severity", values="rows", hole=0.42, title="Issue Severity Mix")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with table_col:
+        if not summary.empty:
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(flagged.head(20), use_container_width=True, hide_index=True)
+
+    st.subheader("Reviewer Work Queue")
+    display_cols = [col for col in ["severity", "issue_type", "issue_column", "record_id", "patient_id", "source", "field_name", "drafted_query"] if col in flagged.columns]
+    st.dataframe(flagged[display_cols] if display_cols else flagged, use_container_width=True, hide_index=True)
+
+    st.download_button("Download flagged records CSV", data=FLAGGED_CSV.read_bytes(), file_name="flagged_records.csv", mime="text/csv")
+
+
+def render_rule_studio(template_id: str) -> None:
+    template = RuleTemplates.get_template(template_id)
+    rules = pd.DataFrame(template["rules"])
+    st.markdown(f"**{template['name']}**: {template['description']}")
+    st.dataframe(rules.fillna(""), use_container_width=True, hide_index=True)
+
+    supported = {"missing_value", "duplicate", "numeric_range", "date_range", "cardinality", "unit_mismatch", "outlier", "allowed_values", "format_check", "date_order"}
+    rules["implemented"] = rules["type"].isin(supported)
+    fig = px.bar(rules.groupby(["type", "implemented"], as_index=False).size(), x="type", y="size", color="implemented", title="Rules Implemented in Spark Engine")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_sql_evidence() -> None:
+    st.markdown(
+        "<div class='note'>For the clinical workflow, the same checks run once in PySpark DataFrame code and once in Spark SQL. Matching results prove the transformation logic is consistent.</div>",
+        unsafe_allow_html=True,
+    )
+    sql_path = PROJECT_ROOT / "sql" / "quality_checks.sql"
+    st.code(sql_path.read_text(encoding="utf-8"), language="sql")
+
+
+def render_project_story() -> None:
+    st.markdown(
+        """
+        **Why this stands out for a fresher healthcare data engineer**
+
+        This is not only a null-cleaning demo. It shows a small but realistic clinical data review pipeline:
+        PySpark for scalable checks, SQL for validation, Python for orchestration, schema profiling for unknown files,
+        and reviewer-ready query text for business users.
+
+        **Skills demonstrated:** CSV ingestion, schema validation, window functions, Spark SQL, configurable rule templates,
+        quality scoring, exports, Streamlit dashboards, and healthcare-domain reasoning.
+        """
+    )
+
+
+datasets = available_datasets()
+uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+if uploaded is not None:
+    target = DATA_DIR / safe_filename(uploaded.name)
+    target.write_bytes(uploaded.getvalue())
+    st.sidebar.success(f"Uploaded {target.name}")
+
+datasets = available_datasets()
+dataset_names = [path.name for path in datasets]
+selected_name = st.sidebar.selectbox("Dataset", dataset_names, index=dataset_names.index("clinical_records.csv") if "clinical_records.csv" in dataset_names else 0)
+selected_path = DATA_DIR / selected_name
+preview_df = load_preview(selected_path)
+domain_profile = detect_domain(preview_df)
+
+template_options = RuleTemplates.list_templates()
+template_ids = [item["id"] for item in template_options]
+suggested_template = "clinical" if domain_profile["domain"] == "clinical" else domain_profile["domain"]
+suggested_index = template_ids.index(suggested_template) if suggested_template in template_ids else template_ids.index("generic")
+st.sidebar.markdown("### Dataset Intelligence")
+st.sidebar.metric("Detected domain", domain_profile["domain"].replace("_", " ").title())
+st.sidebar.metric("Confidence", f"{domain_profile['confidence']:.0%}")
+if domain_profile.get("reason"):
+    st.sidebar.caption("Signals: " + ", ".join(domain_profile["reason"]))
+
+template_id = st.sidebar.selectbox("Rule template", template_ids, index=suggested_index, format_func=lambda value: next(item["name"] for item in template_options if item["id"] == value))
+mode_label = st.sidebar.radio("Execution mode", ["Auto detect", "Clinical SQL validated", "Configurable Spark rules"])
+mode = {"Auto detect": "auto", "Clinical SQL validated": "clinical", "Configurable Spark rules": "configurable"}[mode_label]
 
 st.markdown(
     """
     <div class="hero">
-        <h1 style='margin:0; color:white;'>Clinical Review Command Center</h1>
-        <p style='margin-top:0.6rem; margin-bottom:0; color:#dbeafe; font-size:1.06rem;'>Operational oversight for data-quality triage, issue prioritization, and reviewer query generation.</p>
+      <h1>Healthcare Data Quality Command Center</h1>
+      <p>Domain-aware PySpark + SQL review workflow for healthcare data quality, reviewer queries, and audit-ready exports.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.markdown("### Workflow controls")
-    if st.button("Run review workflow", use_container_width=True, type="primary"):
-        target_dataset = selected_dataset
-        if uploaded_file is not None:
-            target_path = DATA_DIR / uploaded_file.name
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(uploaded_file.getvalue())
-            target_dataset = uploaded_file.name
-        else:
-            target_path = DATA_DIR / selected_dataset
-        with st.spinner("Running data-quality checks and generating executive review output..."):
-            log_lines = []
-            status_plate = st.empty()
-            for line in run_pipeline(str(target_path)):
-                if line.startswith("[FINAL_EXIT_CODE]") or line.startswith("[PROCESS_COMPLETE]"):
-                    continue
-                log_lines.append(line)
-                status_plate.code("\n".join(log_lines[-60:]), language="text")
-            final_log = "\n".join(log_lines)
-            st.session_state.pipeline_log = final_log
-            st.session_state.pipeline_status = "Completed successfully" if "[PROCESS_COMPLETE]" in final_log else "Failed"
-            st.session_state.metrics = parse_pipeline_log(final_log)
+if not looks_clinical(preview_df):
+    st.warning("This file does not match the clinical schema. Use Configurable Spark rules or Auto detect.")
+
+if st.sidebar.button("Run review workflow", type="primary", use_container_width=True):
+    with st.spinner("Running PySpark workflow..."):
+        code, log = run_review(selected_path, mode, template_id)
+    st.session_state["last_log"] = log
+    st.session_state["last_metrics"] = parse_metrics(log)
+    if code == 0:
+        st.sidebar.success("Workflow complete")
         st.rerun()
+    else:
+        st.sidebar.error("Workflow failed. See Runtime Log tab.")
 
-    st.markdown("---")
-    st.caption("Current process state")
-    st.write(st.session_state.pipeline_status)
+flagged_df, summary_df = load_outputs()
+metadata = load_metadata()
+top_a, top_b, top_c = st.columns(3)
+top_a.metric("Selected dataset", selected_name)
+top_b.metric("Auto domain", domain_profile["domain"].replace("_", " ").title())
+top_c.metric("Suggested template", RuleTemplates.get_template(template_id)["name"])
 
-    if st.session_state.pipeline_log:
-        with st.expander("Detailed runtime log"):
-            st.code(st.session_state.pipeline_log, language="text")
+tabs = st.tabs(["Review Dashboard", "Schema Profiler", "Rule Studio", "SQL Evidence", "Run Metadata", "Runtime Log", "Project Story"])
 
-st.markdown("---")
+with tabs[0]:
+    render_review_dashboard(flagged_df, summary_df)
 
-if not locate_flagged_csv():
-    st.warning("No review output available yet. Select a dataset and run the workflow to generate the review pack.")
-    st.stop()
+with tabs[1]:
+    st.subheader(f"Schema Profile: {selected_name}")
+    st.dataframe(preview_df.head(30), use_container_width=True, hide_index=True)
+    render_schema_profile(preview_df)
 
-flagged_df, csv_path = load_flagged_data()
-if flagged_df.empty:
-    st.warning("The flagged output is empty. Please rerun the workflow with a valid clinical dataset.")
-    st.stop()
+with tabs[2]:
+    render_rule_studio(template_id)
 
-st.subheader("Executive overview")
-col_a, col_b, col_c, col_d = st.columns(4)
-review_total = int(st.session_state.metrics.get("total") or len(flagged_df) + 0)
-flagged_total = int(flagged_df.shape[0])
-high_priority = int(flagged_df[flagged_df["severity"] == "high"].shape[0]) if "severity" in flagged_df.columns else 0
-issue_count = int(flagged_df["issue_type"].nunique() if "issue_type" in flagged_df.columns else 0)
+with tabs[3]:
+    render_sql_evidence()
 
-for col, label, value in [
-    (col_a, "Reviewed records", review_total),
-    (col_b, "Flagged records", flagged_total),
-    (col_c, "High priority", high_priority),
-    (col_d, "Unique issue types", issue_count),
-]:
-    with col:
-        st.markdown('<div class="kpi">', unsafe_allow_html=True)
-        st.metric(label, value)
-        st.markdown('</div>', unsafe_allow_html=True)
+with tabs[4]:
+    st.json(metadata or {"message": "Run the workflow to generate metadata."})
 
-st.markdown("---")
+with tabs[5]:
+    st.code(st.session_state.get("last_log", "No workflow run in this Streamlit session yet."), language="text")
 
-with st.container():
-    st.subheader("Review performance by signal")
-    tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Issue intelligence", "Review queue", "Site queries"])
-
-    with tab1:
-        col1, col2 = st.columns(2)
-        with col1:
-            sev_counts = flagged_df["severity"].value_counts().rename_axis("severity").reset_index(name="count")
-            sev_counts["severity"] = sev_counts["severity"].str.title()
-            sev_fig = px.bar(
-                sev_counts,
-                x="severity",
-                y="count",
-                color="severity",
-                color_discrete_map={
-                    "High": SEVERITY_COLORS["high"],
-                    "Medium": SEVERITY_COLORS["medium"],
-                    "Low": SEVERITY_COLORS["low"],
-                    "Unknown": SEVERITY_COLORS["unknown"],
-                },
-                title="Severity Distribution by Clinical Risk",
-                template="plotly_dark",
-            )
-            sev_fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(sev_fig, use_container_width=True)
-
-        with col2:
-            source_counts = flagged_df["source"].value_counts().rename_axis("source").reset_index(name="count")
-            source_fig = px.pie(
-                source_counts,
-                names="source",
-                values="count",
-                title="Flagged Volume by Source",
-                color_discrete_sequence=px.colors.sequential.Aggrnyl,
-                hole=0.35,
-            )
-            source_fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(source_fig, use_container_width=True)
-
-    with tab2:
-        issue_counts = flagged_df["issue_type"].value_counts().rename_axis("issue_type").reset_index(name="count")
-        issue_fig = px.bar(
-            issue_counts,
-            x="count",
-            y="issue_type",
-            orientation="h",
-            title="Issue Type Breakdown",
-            color="issue_type",
-            color_discrete_sequence=px.colors.qualitative.Pastel,
-            template="plotly_dark",
-        )
-        issue_fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(issue_fig, use_container_width=True)
-
-    with tab3:
-        queue_df = flagged_df[["record_id", "patient_id", "source", "field_name", "issue_type", "severity"]].copy()
-        queue_df = queue_df.sort_values(["severity", "source"], ascending=[False, True])
-        st.dataframe(queue_df, use_container_width=True, hide_index=True)
-
-    with tab4:
-        query_df = flagged_df[["record_id", "patient_id", "source", "field_name", "issue_type", "severity", "drafted_query"]].copy()
-        st.dataframe(query_df, use_container_width=True, hide_index=True)
-
-st.markdown("---")
-
-st.subheader("Operational review table")
-show_df = flagged_df.copy()
-if "drafted_query" in show_df.columns:
-    show_df["drafted_query"] = show_df["drafted_query"].fillna("N/A").str.slice(0, 170)
-show_df = show_df[["record_id", "patient_id", "source", "field_name", "issue_type", "severity", "drafted_query"]]
-st.dataframe(show_df, use_container_width=True, hide_index=True)
-
-st.caption(f"Latest data source: {selected_dataset} | Output file: {csv_path}")
-
-st.markdown("---")
-
-if st.button("Export executive review pack", use_container_width=True):
-    export_df = flagged_df.copy()
-    export_path = OUTPUT_DIR / "clinical_review_exec_summary.csv"
-    export_df.to_csv(export_path, index=False)
-    st.success(f"Executive review pack exported to {export_path}")
-
-    summary_df = export_df.groupby(["source", "severity"], as_index=False).size().rename(columns={"size": "flagged_count"})
-    pdf_path = OUTPUT_DIR / "clinical_review_exec_summary.pdf"
-    export_pdf(export_df, summary_df, str(pdf_path))
-    st.success(f"PDF summary exported to {pdf_path}")
+with tabs[6]:
+    render_project_story()

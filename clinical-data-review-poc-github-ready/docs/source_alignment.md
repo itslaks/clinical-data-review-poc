@@ -16,17 +16,18 @@ Key themes from the target workflow:
 
 | Business need | Implementation in this repo |
 | --- | --- |
-| Multi-source data review | CSV dataset with Lab, EDC, and AE-style records |
-| Data quality checks | Missing values, out-of-range checks, stale records, duplicates, unit mismatch |
+| Multi-source data review | CSV dataset with Lab, EDC, AE, encounter, claims, and generic upload support |
+| Dataset understanding | Domain classifier detects healthcare, finance, inventory, web analytics, or generic data |
+| Data quality checks | Missing values, ranges, stale/future dates, duplicates, unit mismatch, code formats, allowed values, outliers |
 | Severity prioritization | High/medium severity assignment |
 | Reviewer communication | Query drafting per flagged record |
-| Operational dashboard | Streamlit executive review dashboard |
+| Operational dashboard | Streamlit command center with dashboard, profiler, rules, SQL evidence, metadata, and logs |
 | Auditability | PySpark + Spark SQL validation |
-| Export-ready output | CSV and PDF review pack |
+| Export-ready output | CSV flagged records, summary CSV, dashboard image, run metadata JSON |
 
 ## Why this is the right scope
 
-The goal is to demonstrate the core logic and user experience of a clinical review workflow, not to reproduce an entire enterprise platform. The project is intentionally focused on a realistic data-engineering slice that is easy to explain, easy to demo, and easy to extend.
+The goal is to demonstrate the core logic and user experience of a clinical review workflow, not to reproduce an entire enterprise platform. The project is intentionally focused on a realistic data-engineering slice that is easy to explain, easy to demo, and easy to extend for an L1 healthcare data engineer role.
 
 ## Demo framing
 

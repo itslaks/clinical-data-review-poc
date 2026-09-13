@@ -13,39 +13,39 @@ class RuleTemplates:
     def clinical_data() -> Dict[str, Any]:
         """Rules for clinical/healthcare datasets."""
         return {
-            'name': 'Clinical Data',
-            'description': 'Quality checks for healthcare and clinical records',
+            'name': 'Healthcare / Clinical Data',
+            'description': 'Healthcare checks for patient, encounter, lab, vitals, claims, medication, and review datasets',
             'domain': 'healthcare',
             'rules': [
                 {
                     'id': 'missing_id',
                     'type': 'missing_value',
-                    'column_pattern': '.*id$|.*patient.*|.*record.*',
+                    'column_pattern': '.*id$|.*patient.*|.*member.*|.*record.*|.*encounter.*|.*claim.*',
                     'enabled': True,
                     'severity': 'critical',
-                    'description': 'Check for missing patient/record IDs'
+                    'description': 'Patient, member, record, encounter, and claim identifiers should not be blank'
                 },
                 {
-                    'id': 'missing_measurement',
+                    'id': 'missing_clinical_measurement',
                     'type': 'missing_value',
-                    'column_pattern': '.*value$|.*result$|.*amount$',
+                    'column_pattern': '.*value$|.*result$|.*measurement.*|.*reading.*|.*lab.*',
                     'enabled': True,
                     'severity': 'warning',
-                    'threshold_warning': 5,  # Allow up to 5% missing
+                    'threshold_warning': 1,
                     'threshold_critical': 20
                 },
                 {
-                    'id': 'duplicate_measurement',
+                    'id': 'duplicate_patient_or_record',
                     'type': 'duplicate',
-                    'column_pattern': '.*id$|.*patient.*',
+                    'column_pattern': '.*record_id$|.*encounter_id$|.*claim_id$',
                     'enabled': True,
-                    'severity': 'warning',
-                    'allow_duplicates_with_different_date': True
+                    'severity': 'critical',
+                    'description': 'Unique clinical/claims records should not repeat'
                 },
                 {
-                    'id': 'out_of_range',
+                    'id': 'reference_range_violation',
                     'type': 'numeric_range',
-                    'column_pattern': '.*value$|.*result$|ref_low|ref_high',
+                    'column_pattern': '.*value$|.*result$|.*measurement.*|.*reading.*',
                     'enabled': True,
                     'severity': 'warning',
                     'use_reference_range': True
@@ -60,12 +60,113 @@ class RuleTemplates:
                     'check_against_standard': True
                 },
                 {
-                    'id': 'stale_data',
+                    'id': 'future_clinical_date',
                     'type': 'date_range',
-                    'column_pattern': '.*date$|.*received$|.*created$',
+                    'column_pattern': '.*date$|.*received$|.*created$|.*admission.*|.*discharge.*|.*service.*|.*visit.*',
+                    'enabled': True,
+                    'severity': 'critical',
+                    'check_future': True
+                },
+                {
+                    'id': 'stale_clinical_data',
+                    'type': 'date_range',
+                    'column_pattern': '.*date$|.*received$|.*created$|.*admission.*|.*discharge.*|.*service.*|.*visit.*',
                     'enabled': True,
                     'severity': 'warning',
                     'max_age_days': 365
+                },
+                {
+                    'id': 'invalid_age',
+                    'type': 'numeric_range',
+                    'column_pattern': '^age$|.*patient_age.*|.*member_age.*',
+                    'enabled': True,
+                    'severity': 'critical',
+                    'min_value': 0,
+                    'max_value': 120
+                },
+                {
+                    'id': 'invalid_gender_code',
+                    'type': 'allowed_values',
+                    'column_pattern': '^gender$|^sex$|.*gender.*|.*sex.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'allowed_values': ['m', 'f', 'male', 'female', 'other', 'unknown', 'u']
+                },
+                {
+                    'id': 'invalid_status_code',
+                    'type': 'allowed_values',
+                    'column_pattern': '.*status.*|.*disposition.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'allowed_values': ['active', 'inactive', 'open', 'closed', 'complete', 'completed', 'pending', 'cancelled', 'discharged', 'admitted']
+                },
+                {
+                    'id': 'invalid_icd_code_format',
+                    'type': 'format_check',
+                    'column_pattern': '.*icd.*|.*diagnosis.*code.*|.*dx.*code.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'regex': '^[A-TV-Z][0-9][0-9A-Z](\\.[0-9A-Z]{1,4})?$'
+                },
+                {
+                    'id': 'invalid_npi_format',
+                    'type': 'format_check',
+                    'column_pattern': '.*npi.*|.*provider.*id.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'regex': '^[0-9]{10}$'
+                },
+                {
+                    'id': 'admission_before_discharge',
+                    'type': 'date_order',
+                    'start_pattern': '.*admission.*|.*admit.*|.*start.*',
+                    'end_pattern': '.*discharge.*|.*end.*',
+                    'enabled': True,
+                    'severity': 'critical'
+                },
+                {
+                    'id': 'invalid_bmi',
+                    'type': 'numeric_range',
+                    'column_pattern': '^bmi$|.*body_mass.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'min_value': 10,
+                    'max_value': 80
+                },
+                {
+                    'id': 'invalid_heart_rate',
+                    'type': 'numeric_range',
+                    'column_pattern': '.*heart.*rate.*|^hr$|.*pulse.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'min_value': 20,
+                    'max_value': 250
+                },
+                {
+                    'id': 'invalid_blood_pressure',
+                    'type': 'numeric_range',
+                    'column_pattern': '.*systolic.*|.*diastolic.*|.*bp$|.*blood_pressure.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'min_value': 30,
+                    'max_value': 300
+                },
+                {
+                    'id': 'negative_healthcare_amount',
+                    'type': 'numeric_range',
+                    'column_pattern': '.*charge.*|.*cost.*|.*amount.*|.*paid.*|.*allowed.*',
+                    'enabled': True,
+                    'severity': 'warning',
+                    'allow_negative': False
+                },
+                {
+                    'id': 'lab_value_outlier',
+                    'type': 'outlier',
+                    'column_pattern': '.*value$|.*result$|.*lab.*|.*measurement.*',
+                    'enabled': True,
+                    'severity': 'info',
+                    'method': 'iqr',
+                    'multiplier': 3.0
                 }
             ]
         }
@@ -160,10 +261,11 @@ class RuleTemplates:
                 },
                 {
                     'id': 'duplicate_sku_location',
-                    'type': 'duplicate_composite',
-                    'columns': ['sku', 'location', 'warehouse'],
+                    'type': 'duplicate',
+                    'column_pattern': '.*sku$|.*product.*id|.*item.*id',
                     'enabled': True,
-                    'severity': 'warning'
+                    'severity': 'warning',
+                    'description': 'Flags repeated product identifiers for manual warehouse/location review'
                 },
                 {
                     'id': 'old_records',
@@ -175,11 +277,12 @@ class RuleTemplates:
                 },
                 {
                     'id': 'zero_quantity',
-                    'type': 'numeric_value',
+                    'type': 'numeric_range',
                     'column_pattern': '.*quantity$|.*count$',
-                    'enabled': True,
+                    'enabled': False,
                     'severity': 'info',
-                    'flag_zero': True
+                    'min_value': 1,
+                    'description': 'Optional check to review zero stock rows'
                 }
             ]
         }
@@ -285,6 +388,11 @@ class RuleTemplates:
             'web_analytics': RuleTemplates.web_analytics_data(),
             'generic': RuleTemplates.generic_data()
         }
+
+    @staticmethod
+    def get_available_templates() -> Dict[str, Dict[str, Any]]:
+        """Backward-compatible alias used by older docs/tests."""
+        return RuleTemplates.all_templates()
     
     @staticmethod
     def get_template(domain: str) -> Dict[str, Any]:

@@ -5,8 +5,8 @@ Supports auto-detection of numeric, categorical, date, ID, and other column type
 
 import pandas as pd
 import re
+import warnings
 from typing import Dict, List, Tuple, Any
-from datetime import datetime
 
 
 class SchemaDetector:
@@ -33,6 +33,27 @@ class SchemaDetector:
         r'.*status$', r'.*type$', r'.*category$', r'.*source$',
         r'.*name$', r'.*title$', r'.*description$', r'.*unit$'
     ]
+
+    DOMAIN_KEYWORDS = {
+        "clinical": [
+            "patient", "record", "encounter", "visit", "diagnosis", "icd", "procedure",
+            "medication", "rx", "lab", "result", "value", "unit", "ref_low",
+            "ref_high", "vital", "blood_pressure", "heart_rate", "glucose",
+            "hemoglobin", "admission", "discharge", "provider", "claim", "member"
+        ],
+        "financial": [
+            "transaction", "amount", "balance", "invoice", "payment", "account",
+            "debit", "credit", "price", "currency", "ledger", "refund"
+        ],
+        "inventory": [
+            "sku", "product", "item", "warehouse", "stock", "quantity",
+            "reorder", "supplier", "location", "shipment"
+        ],
+        "web_analytics": [
+            "event", "session", "user", "page", "click", "timestamp",
+            "duration", "browser", "device", "campaign", "utm"
+        ],
+    }
     
     def __init__(self, df: pd.DataFrame, max_unique_ratio: float = 0.1):
         """
@@ -106,20 +127,25 @@ class SchemaDetector:
         if len(col_data_clean) == 0:
             return 'unknown', 0.5
         
-        # Check if it's a date
-        if self._is_date(col_data_clean):
-            return 'date', 0.95
-        
-        # Check if it's numeric
+        date_name_hint = any(re.match(pattern, col_name_lower) for pattern in self.DATE_PATTERNS)
+
+        # Numeric columns should not be misclassified as dates just because
+        # pandas can coerce numbers into timestamps.
         if self._is_numeric(col_data_clean):
             return 'numeric', 0.95
+
+        if date_name_hint and self._is_date(col_data_clean):
+            return 'date', 0.95
+
+        if self._is_date(col_data_clean):
+            return 'date', 0.85
         
         # Check if it's categorical (limited unique values)
         if len(col_data_clean.unique()) / len(col_data_clean) < 0.1:
             return 'categorical', 0.8
         
         # Check if it's an ID (high uniqueness)
-        if len(col_data_clean.unique()) / len(col_data_clean) > 0.5:
+        if len(col_data_clean.unique()) / len(col_data_clean) > max(self.max_unique_ratio, 0.5):
             return 'id', 0.7
         
         # Default to text
@@ -127,14 +153,17 @@ class SchemaDetector:
     
     def _is_date(self, col_data: pd.Series) -> bool:
         """Check if column contains dates."""
-        # Try to parse as datetime
         try:
-            pd.to_datetime(col_data, errors='coerce')
-            # If most values parse successfully, it's a date
-            parsed = pd.to_datetime(col_data, errors='coerce')
+            sample = col_data.astype(str).head(20)
+            has_date_shape = sample.str.contains(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", regex=True).mean() > 0.5
+            if not has_date_shape:
+                return False
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                parsed = pd.to_datetime(col_data, errors='coerce')
             success_ratio = (1 - parsed.isna().sum() / len(col_data))
             return success_ratio > 0.7
-        except:
+        except Exception:
             return False
     
     def _is_numeric(self, col_data: pd.Series) -> bool:
@@ -144,7 +173,7 @@ class SchemaDetector:
             numeric = pd.to_numeric(col_data, errors='coerce')
             success_ratio = (1 - numeric.isna().sum() / len(col_data))
             return success_ratio > 0.9
-        except:
+        except Exception:
             return False
     
     def _detect_semantic_role(self, col_name: str, col_data: pd.Series, 
@@ -219,6 +248,44 @@ class SchemaDetector:
             summary['data_quality']['avg_null_ratio'] = sum(null_ratios) / len(null_ratios)
         
         return summary
+
+    def classify_domain(self) -> Dict[str, Any]:
+        """Classify the likely business domain from column names and samples."""
+        if not self.schema:
+            self.detect_schema()
+
+        column_text = " ".join(str(col).lower().replace("-", "_") for col in self.df.columns)
+        sample_text = " ".join(
+            " ".join(str(v).lower() for v in self.df[col].dropna().astype(str).head(5).tolist())
+            for col in self.df.columns[:25]
+        )
+        corpus = f"{column_text} {sample_text}"
+
+        scores = {}
+        for domain, keywords in self.DOMAIN_KEYWORDS.items():
+            score = 0
+            matched = []
+            for keyword in keywords:
+                if keyword in corpus:
+                    score += 2 if keyword in column_text else 1
+                    matched.append(keyword)
+            scores[domain] = {"score": score, "matched": sorted(set(matched))}
+
+        best_domain = max(scores, key=lambda key: scores[key]["score"]) if scores else "generic"
+        best_score = scores.get(best_domain, {}).get("score", 0)
+        total_score = sum(item["score"] for item in scores.values())
+        confidence = round(best_score / total_score, 2) if total_score else 0.0
+
+        if best_score == 0:
+            best_domain = "generic"
+            confidence = 0.25
+
+        return {
+            "domain": best_domain,
+            "confidence": confidence,
+            "scores": scores,
+            "reason": scores.get(best_domain, {}).get("matched", [])[:8],
+        }
     
     def recommend_rules(self) -> List[Dict[str, Any]]:
         """
@@ -285,7 +352,7 @@ class SchemaDetector:
                             'lower_bound': float(lower_bound),
                             'upper_bound': float(upper_bound)
                         })
-                except:
+                except Exception:
                     pass
             
             # Rule 5: Cardinality check for categorical

@@ -1,220 +1,114 @@
-# Advanced Configurable Data Quality Platform
+# Healthcare Data Quality Command Center
 
-**Now supports ANY dataset, not just clinical data** ✨
+A fresher-friendly data engineering POC for clinical data review using **Python, PySpark, Spark SQL, pandas, and Streamlit**.
 
-An enterprise-grade, domain-agnostic data quality platform implemented in Python, PySpark, and Streamlit. Auto-detects column types, provides pre-built templates for 5 domains, and allows zero-code configuration via UI or programmatic API.
+This project goes beyond basic data cleaning. It simulates a healthcare data-quality workflow where raw clinical records are checked, validated, scored by severity, converted into reviewer queries, and exported as audit-ready outputs.
 
-**Originally** a clinical data review POC. **Now** a flexible platform for financial, inventory, web analytics, and custom domains.
+## Why This Stands Out
 
-## What's New in v2.0
+Most data-cleaning POCs stop at removing nulls. This one shows a practical healthcare review flow:
 
-- 🔍 **Auto-Detection**: SchemaDetector infers column types and semantic roles from any CSV
-- 📋 **5 Pre-Built Templates**: Choose from Clinical, Financial, Inventory, Web Analytics, or Generic
-- ⚙️ **Zero-Code Configuration**: Streamlit UI wizard for business users (no Python needed)
-- 💾 **Save/Load Configs**: Persist configurations as JSON for reuse and version control
-- 🔧 **Extensible Rules Engine**: ConfigurableQualityEngine supports 5 rule types
-- 📊 **Full Documentation**: 6+ comprehensive guides covering all aspects
-- 🔄 **100% Backward Compatible**: Original clinical workflow still works
+- PySpark DataFrame checks for scalable validation.
+- Spark SQL version of the same clinical checks for cross-validation.
+- Intelligent domain detection for healthcare, finance, inventory, web analytics, and generic datasets.
+- Healthcare-first rule templates for patient, encounter, lab, vitals, claims, medication, and demographic files.
+- Schema profiling for unknown CSV files with confidence scores and matched domain signals.
+- Reviewer-ready query text, not just cleaned data.
+- Streamlit command center for dashboard, profiler, rule studio, SQL evidence, metadata, runtime log, and project story.
 
-See [CHANGELOG.md](CHANGELOG.md) for complete version history.
+## Project Location
 
-## What this project does
-
-### Three Ways to Use It:
-
-1. **Default Mode** (Backward Compatible)
-   - Uses hardcoded clinical rules
-   - Works exactly as before
-   - `python src/main.py`
-
-2. **Interactive Configuration** (Recommended for Business Users)
-   - Upload ANY CSV file
-   - Auto-detect schema (column types, semantic roles)
-   - Choose from 5 templates: Clinical, Financial, Inventory, Web Analytics, Generic
-   - Customize rules and thresholds via UI
-   - Save configurations for reuse
-   - `streamlit run app.py` → Configuration tab
-
-3. **Programmatic** (For Developers)
-   - Full Python API
-   - Create custom domains
-   - Automate configuration
-   - Integrate into pipelines
-
-## Key Features
-
-✅ **Auto-Detection** - Infers column types and semantic roles (95%+ accuracy)  
-✅ **5 Pre-Built Templates** - Clinical, Financial, Inventory, Web Analytics, Generic  
-✅ **5 Rule Types** - Missing values, duplicates, numeric ranges, dates, cardinality  
-✅ **No-Code Configuration** - Streamlit UI wizard for business users  
-✅ **Save/Load Configs** - Persist as JSON, version control friendly  
-✅ **Professional Output** - CSV, PDF exports with severity scoring  
-✅ **Extensible** - Add custom rules and domains easily  
-✅ **100% Backward Compatible** - Clinical mode unchanged
-
-## Architecture Overview
-
-```mermaid
-flowchart TD
-    subgraph Input["📥 Input"]
-        A1["CSV File<br/>(Any Format)"]
-    end
-    
-    subgraph Detection["🔍 Auto-Detection"]
-        B1["SchemaDetector<br/>(Auto-infer types)"]
-        B2["Type Inference<br/>(5 types detected)"]
-        B3["Semantic Roles<br/>(ID, date, measurement)"]
-    end
-    
-    subgraph Config["⚙️ Configuration"]
-        C1["RuleTemplates<br/>(5 pre-built)"]
-        C2["ConfigUI<br/>(Streamlit wizard)"]
-        C3["Custom Rules<br/>(Programmatic)"]
-    end
-    
-    subgraph Engine["⚡ Quality Engine"]
-        D1["ConfigurableQualityEngine<br/>(5 rule types)"]
-        D2["Dynamic Rule Execution<br/>(Any schema)"]
-    end
-    
-    subgraph Output["📊 Output"]
-        E1["Dashboard"]
-        E2["CSV Export"]
-        E3["PDF Report"]
-    end
-    
-    A1 --> B1
-    B1 --> B2 --> B3
-    B3 --> C1 & C2 & C3
-    C1 --> D1
-    C2 --> D1
-    C3 --> D1
-    D1 --> D2
-    D2 --> E1 & E2 & E3
-```
-
-**Backward Compatibility Mode** (Original Clinical):
-```mermaid
-flowchart LR
-    A["Clinical CSV"] --> B["Hardcoded Schema"]
-    B --> C["DataFrame Checks"]
-    B --> D["SQL Checks"]
-    C --> E["Cross-Validation"]
-    D --> E
-    E --> F["Output"]
-```
-
-## Dataset Format
-
-### Default Mode (Clinical)
-
-The pipeline expects a CSV with these clinical columns:
-- `record_id`, `patient_id`, `source`, `field_name`, `value`, `unit`, `expected_unit`, `ref_low`, `ref_high`, `data_received_date`
-
-The demo dataset in `data/` already matches this format.
-
-### Configurable Mode (ANY Dataset)
-
-Upload **any** CSV file with **any** columns:
-1. Launch Streamlit: `streamlit run app.py`
-2. Go to Configuration tab
-3. Upload your CSV
-4. System auto-detects column types and semantic roles
-5. Choose a template (or customize rules)
-6. Run analysis
-
-**No predefined schema required** - the system adapts to your data!
-
-## Recommended environment
-
-- Python: 3.12.x
-- Java: 11 or 17
-- PySpark: 3.5.x
-
-## Clone and setup
-
-From a terminal in the project folder:
+The working app is inside:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
+cd clinical-data-review-poc-github-ready
+```
+
+## Quick Start
+
+```powershell
+cd clinical-data-review-poc-github-ready
 python -m pip install -r requirements.txt
-```
-
-## Quick Start (Choose One)
-
-### 1️⃣ Interactive UI (Recommended for Most Users)
-
-```powershell
+python run_tests.py
 streamlit run app.py
-# Opens browser at http://localhost:8501
-# Click "Configuration" tab → Upload CSV → Select template → Run
 ```
 
-### 2️⃣ Default Mode (Backward Compatible)
+Open the Streamlit URL shown in the terminal.
+
+## Spark Prerequisites
+
+The light tests and schema profiler work without Java. The full PySpark workflow needs:
+
+- Python 3.10, 3.11, or 3.12
+- Java JDK 11 or 17 on `PATH`
+- Packages from `requirements.txt`
+
+Verify Java:
 
 ```powershell
-python src/main.py
-# Analyzes data/clinical_records.csv with hardcoded clinical rules
-# Works exactly as before
+java -version
 ```
 
-### 3️⃣ Programmatic (For Developers)
+## What The App Does
 
-```python
-from src.rule_templates import RuleTemplates
-from src.main import main
+1. Loads a CSV dataset.
+2. Detects schema, column roles, likely business domain, and suggested rule template.
+3. Runs healthcare quality checks:
+   - missing patient/record/encounter/claim identifiers
+   - missing clinical measurements
+   - duplicate records
+   - stale or future clinical dates
+   - admission/discharge date order
+   - out-of-range values using reference ranges
+   - unit mismatches
+   - invalid age, BMI, heart rate, and blood pressure ranges
+   - invalid gender/status values
+   - ICD/NPI-like format checks
+   - negative healthcare amount checks
+   - lab/vital outliers
+4. Cross-validates the clinical rules with Spark SQL when the dataset matches the clinical schema.
+5. Assigns severity.
+6. Drafts reviewer queries.
+7. Exports flagged records, summary CSV, dashboard image, and run metadata JSON.
 
-# Load and customize a template
-config = RuleTemplates.get_template('financial')
-main(rule_config=config['rules'])
-```
+## Main Files
 
-## Core Modules
+- `app.py` - Streamlit command center.
+- `src/main.py` - PySpark orchestration.
+- `src/quality_checks.py` - Spark rules engine and clinical checks.
+- `src/schema_detector.py` - CSV schema profiling.
+- `src/rule_templates.py` - reusable rule templates.
+- `sql/quality_checks.sql` - SQL implementation for validation.
+- `data/clinical_records.csv` - demo healthcare dataset.
 
-**New Configurable System** (4 modules, ~2400 lines):
-- [`src/schema_detector.py`](src/schema_detector.py) - Auto-detect column types and semantic roles
-- [`src/rule_templates.py`](src/rule_templates.py) - 5 domain templates (clinical, financial, inventory, web analytics, generic)
-- [`src/config_ui.py`](src/config_ui.py) - Streamlit UI components for configuration
-- [`src/quality_checks.py`](src/quality_checks.py) - **REFACTORED** with `ConfigurableQualityEngine` class
+## Portfolio Talking Points
 
-**Enhanced Modules**:
-- [`src/main.py`](src/main.py) - **ENHANCED** to support dynamic rule configuration
+Use these in your project selection/interview:
 
-**Legacy Modules** (Unchanged):
-- [`src/ingest.py`](src/ingest.py) - Schema validation and data loading
-- [`src/query_drafting.py`](src/query_drafting.py) - Query text generation
-- [`src/report.py`](src/report.py) - Summary report generation
-- [`src/visualize.py`](src/visualize.py) - Dashboard generation
+- "I used PySpark window functions to find duplicate clinical measurements."
+- "I wrote the same quality logic in Spark SQL and cross-validated it against the DataFrame output."
+- "I added domain detection so the system recommends healthcare, finance, inventory, web analytics, or generic rules from the dataset itself."
+- "I converted technical quality failures into reviewer-friendly clinical queries."
+- "I added healthcare-native checks for lab values, vitals, claims, demographics, ICD/NPI-style fields, and encounter timelines."
+- "I kept the project explainable for an L1 data engineer role while still showing production-style thinking."
 
-## Documentation
+## Outputs
 
-- [`CONFIGURATION_GUIDE.md`](CONFIGURATION_GUIDE.md) - Complete user guide (450 lines)
-- [`SYSTEM_ARCHITECTURE.md`](SYSTEM_ARCHITECTURE.md) - Technical reference (350 lines)
-- [`QUICK_START_ADVANCED.md`](QUICK_START_ADVANCED.md) - Getting started guide (300 lines)
-- [`FEATURES.md`](FEATURES.md) - Feature matrix
-- [`IMPLEMENTATION_COMPLETE.md`](IMPLEMENTATION_COMPLETE.md) - What was built
-- [`DELIVERY_SUMMARY.md`](DELIVERY_SUMMARY.md) - Executive overview
+Generated runtime outputs are written to:
 
-## Available Templates
+- `output/flagged_records/flagged_records.csv`
+- `output/summary_report.csv`
+- `output/visualizations/clinical_review_dashboard.png`
+- `output/run_metadata.json`
 
-| Template | Best For | Key Rules |
-|----------|----------|-----------|
-| 🏥 **Clinical** | Healthcare, medical records | Missing IDs, unit checks, stale data, out-of-range |
-| 💰 **Financial** | Transactions, accounting | Missing amounts (critical), duplicates, future dates |
-| 📦 **Inventory** | Warehouse, supply chain | Negative quantities (critical), duplicates, old records |
-| 📊 **Web Analytics** | Events, sessions, metrics | Future events (critical), missing IDs, unrealistic durations |
-| 🔧 **Generic** | Any dataset | Missing values, duplicates, outliers |
+These files are ignored by Git.
 
-## Business Value
+## Production-Ready Practices Included
 
-This platform demonstrates that data quality review can be automated to:
-
-- ✅ Detect issues automatically (clinical, financial, inventory, custom domains)
-- ✅ Reduce manual scan time (from weeks to minutes)
-- ✅ Standardize quality rules (templates provide baselines)
-- ✅ Prioritize urgent issues (severity scoring)
-- ✅ Generate clear follow-up queries (reviewer-facing text)
-- ✅ Provide operational visibility (professional dashboard)
-- ✅ Adapt to any domain (configurable, not hardcoded)
+- Clear setup and testing commands.
+- Runtime metadata for auditability.
+- Sanitized upload filenames.
+- Generated files ignored by Git.
+- Light tests that work without Spark.
+- Spark integration tests for full environments.
+- Separated Python modules for ingestion, checks, query drafting, reports, schema detection, and visualization.

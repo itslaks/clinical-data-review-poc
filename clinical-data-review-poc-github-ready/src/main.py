@@ -1,264 +1,267 @@
 """
 main.py
 -------
-Clinical Data Review Agent - PySpark POC
+Orchestrates the healthcare data quality review workflow.
 
-Problem this addresses:
-IQVIA's Clinical Data Review stage (part of their Clinical Data Analytics
-Solutions platform) is, per IQVIA's own published figures, a manual
-process that can take up to seven weeks per cycle. This POC automates
-the first two steps of that process on a small sample:
-  1. Detect data issues (missing values, out-of-range results)
-  2. Draft the query text that would be sent back to the trial site
-
-Everything here runs locally with no external API or LLM call, since
-none is available on this machine. See README.md for the full write-up,
-including what this does and doesn't prove.
-
-Run from the project root:
-    python3 src/main.py
+Portfolio angle:
+- PySpark ingestion and transformations.
+- Spark SQL cross-validation for the clinical rule set.
+- Configurable data-quality rules for non-clinical CSVs.
+- Reviewer-friendly exports that show business usefulness.
 """
 
+from __future__ import annotations
+
+import argparse
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Dict, List
 
 import pandas as pd
 
-
-def ensure_java_home():
-    """Set JAVA_HOME to the installed JDK if the environment is stale or missing."""
-    java_home = os.environ.get("JAVA_HOME")
-    if java_home and os.path.exists(os.path.join(java_home, "bin", "java.exe")):
-        os.environ["PATH"] = os.path.join(java_home, "bin") + os.pathsep + os.environ.get("PATH", "")
-        return
-
-    candidates = [
-        r"C:\Program Files\OpenLogic\jdk-11.0.19.7-hotspot",
-        r"C:\Program Files\Java\jdk-11.0.19",
-        r"C:\Program Files\OpenJDK",
-        r"C:\Program Files\Eclipse Adoptium",
-    ]
-    for base in candidates:
-        if os.path.isdir(base):
-            for root, dirs, _ in os.walk(base):
-                java_exe = os.path.join(root, "bin", "java.exe")
-                if os.path.exists(java_exe):
-                    os.environ["JAVA_HOME"] = root
-                    os.environ["PATH"] = os.path.join(root, "bin") + os.pathsep + os.environ.get("PATH", "")
-                    return
-    if shutil.which("java"):
-        java_path = shutil.which("java")
-        java_root = os.path.dirname(os.path.dirname(java_path))
-        os.environ["JAVA_HOME"] = java_root
-        os.environ["PATH"] = os.path.join(java_root, "bin") + os.pathsep + os.environ.get("PATH", "")
-
-
-ensure_java_home()
-
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+sys.path.insert(0, str(SRC_DIR))
+os.environ["PYTHONPATH"] = str(SRC_DIR) + os.pathsep + os.environ.get("PYTHONPATH", "")
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-venv_pyspark = os.path.join(project_root, ".venv", "Lib", "site-packages", "pyspark")
-if os.path.isdir(venv_pyspark):
-    os.environ["SPARK_HOME"] = venv_pyspark
-
-if sys.version_info[:2] != (3, 12):
-    print("ERROR: This project is validated for Python 3.12.x (recommended: 3.12.2).")
-    print("Current interpreter: " + sys.executable)
-    print("PySpark startup can fail on unsupported Windows Python versions.")
-    print()
-    print("Fix:")
-    print("  py -3.12 -m venv .venv")
-    print("  .\\.venv\\Scripts\\python.exe -m pip install -U pip")
-    print("  .\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt")
-    print("  .\\.venv\\Scripts\\python.exe src/main.py")
-    raise SystemExit(2)
-
-if shutil.which("java") is None:
-    print("ERROR: Java is not installed or not on PATH for PySpark on Windows.")
-    print("Spark needs a JDK/JRE available to start the JVM.")
-    print()
-    print("Fix:")
-    print("  Install JDK 11 or JDK 17.")
-    print("  Then restart PowerShell and verify with: java -version")
-    print("  Optional: set JAVA_HOME to the Java install directory")
-    raise SystemExit(2)
-
-java_version = subprocess.run(["java", "-version"], capture_output=True, text=True)
-java_text = (java_version.stderr or java_version.stdout or "").strip()
-if not re.search(r"version\s+\"(1\.[89]|11|17|21)\b", java_text):
-    print("ERROR: Unsupported Java version for this PySpark setup.")
-    print("Detected Java output: " + (java_text[:200] or "<none>"))
-    print("This project is validated with Java 11 or Java 17 and PySpark 3.5.")
-    print("Install JDK 11 or JDK 17 and ensure java -version works before running Spark.")
-    raise SystemExit(2)
-
-SRC_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SRC_DIR)
-
-# PySpark executor subprocesses (even in local mode) start with their own
-# Python path. They do not automatically inherit sys.path changes made in
-# the driver process. Without this, the UDF in query_drafting.py fails on
-# workers with "No module named 'query_drafting'". Setting PYTHONPATH
-# before the SparkSession is created fixes it.
-os.environ["PYTHONPATH"] = SRC_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")
-
-from pyspark.sql import SparkSession
 
 import config
-
-if os.environ.get("CLINICAL_DATA_FILE"):
-    config.INPUT_PATH = os.environ["CLINICAL_DATA_FILE"]
-    config.OUTPUT_DIR = os.path.join(os.path.dirname(config.INPUT_PATH), "output")
-    config.SQL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
-
-from ingest import load_records
-from quality_checks import (
-    run_checks_dataframe, run_checks_sql, cross_validate, add_severity,
-    ConfigurableQualityEngine
-)
+from ingest import RECORD_SCHEMA, load_records
+from quality_checks import ConfigurableQualityEngine, add_severity, cross_validate, run_checks_dataframe, run_checks_sql
 from query_drafting import add_drafted_queries
 from report import build_summary
+from rule_templates import RuleTemplates
+from schema_detector import SchemaDetector
 from visualize import save_dashboard
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("clinical_data_review")
 
 
-def print_stage(stage_name, message):
+def ensure_java_home() -> None:
+    """Best-effort Java discovery for Windows laptops."""
+    java_home = os.environ.get("JAVA_HOME")
+    if java_home and Path(java_home, "bin", "java.exe").exists():
+        os.environ["PATH"] = str(Path(java_home, "bin")) + os.pathsep + os.environ.get("PATH", "")
+        return
+
+    candidates = [
+        Path(r"C:\Program Files\OpenLogic"),
+        Path(r"C:\Program Files\Eclipse Adoptium"),
+        Path(r"C:\Program Files\Java"),
+    ]
+    for base in candidates:
+        if not base.exists():
+            continue
+        for java_exe in base.glob("**/bin/java.exe"):
+            os.environ["JAVA_HOME"] = str(java_exe.parents[1])
+            os.environ["PATH"] = str(java_exe.parent) + os.pathsep + os.environ.get("PATH", "")
+            return
+
+
+def validate_runtime() -> None:
+    if sys.version_info < (3, 10) or sys.version_info >= (3, 13):
+        raise SystemExit("Use Python 3.10, 3.11, or 3.12 for this PySpark POC.")
+
+    ensure_java_home()
+    if shutil.which("java") is None:
+        raise SystemExit("Java is required for PySpark. Install JDK 11 or 17 and verify with: java -version")
+
+    java_version = subprocess.run(["java", "-version"], capture_output=True, text=True, check=False)
+    java_text = (java_version.stderr or java_version.stdout or "").strip()
+    if not re.search(r"version\s+\"(1\.[89]|11|17|21)\b", java_text):
+        raise SystemExit(f"Unsupported Java version for this POC. Detected: {java_text[:200] or '<none>'}")
+
+
+def print_stage(stage_name: str, message: str) -> None:
     print(f"\n[PHASE] {stage_name} - {message}")
 
 
-def run_checks_with_config(records, rule_config=None, use_legacy=True):
-    """
-    Run quality checks using either:
-    1. Legacy clinical rules (DataFrame + SQL cross-validation) if use_legacy=True
-    2. Configurable rule engine if use_legacy=False and rule_config provided
-    
-    Args:
-        records: PySpark DataFrame
-        rule_config: List of rule definitions (for configurable mode)
-        use_legacy: If True, use legacy clinical checks; if False, use configurable engine
-    
-    Returns:
-        Flagged records DataFrame
-    """
-    if use_legacy:
-        # Use original clinical checking logic
-        return run_checks_dataframe(records)
-    
-    elif rule_config:
-        # Use configurable quality engine
-        engine = ConfigurableQualityEngine(rule_config)
-        return engine.run(records)
-    
+def load_generic_records(spark, path: str):
+    logger.info("Loading generic CSV from %s", path)
+    df = spark.read.option("header", True).option("inferSchema", True).csv(path)
+    if df.count() == 0:
+        raise ValueError(f"No records loaded from {path}.")
+    return df
+
+
+def looks_like_clinical_schema(columns: List[str]) -> bool:
+    required = {field.name for field in RECORD_SCHEMA.fields}
+    return required.issubset(set(columns))
+
+
+def classify_dataset(path: str) -> Dict[str, Any]:
+    preview = pd.read_csv(path, nrows=1000)
+    detector = SchemaDetector(preview)
+    detector.detect_schema()
+    return detector.classify_domain()
+
+
+def normalize_flagged_for_export(flagged_df, clinical_mode: bool):
+    if clinical_mode:
+        ordered = [
+            "record_id",
+            "patient_id",
+            "source",
+            "field_name",
+            "value",
+            "unit",
+            "expected_unit",
+            "ref_low",
+            "ref_high",
+            "data_received_date",
+            "issue_type",
+            "severity",
+            "drafted_query",
+        ]
+        return flagged_df.select(*[col for col in ordered if col in flagged_df.columns])
+
+    front = ["issue_type", "issue_column", "rule_id", "severity", "drafted_query"]
+    ordered = [col for col in front if col in flagged_df.columns] + [col for col in flagged_df.columns if col not in front]
+    return flagged_df.select(*ordered)
+
+
+def build_generic_summary(flagged_df):
+    group_cols = ["issue_type", "severity"]
+    if "source" in flagged_df.columns:
+        group_cols.insert(0, "source")
     else:
-        # Default to legacy if no config provided
-        return run_checks_dataframe(records)
+        flagged_df = flagged_df.withColumn("source", flagged_df["issue_column"])
+        group_cols.insert(0, "source")
+    return flagged_df.groupBy(*group_cols).count().withColumnRenamed("count", "flagged_count")
 
 
-def main(rule_config=None):
-    print_stage("START", "Initializing project environment and Spark session")
-    spark = (
-        SparkSession.builder
-        .appName("ClinicalDataReviewAgent")
-        .master("local[*]")
-        .getOrCreate()
-    )
+def run_pipeline(dataset_path: str | None = None, rule_config: List[Dict[str, Any]] | None = None, force_mode: str = "auto") -> Dict[str, Any]:
+    validate_runtime()
+
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.appName("ClinicalDataReviewAgent").master("local[*]").getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
+    input_path = dataset_path or os.environ.get("CLINICAL_DATA_FILE") or config.INPUT_PATH
+    output_dir = Path(os.environ.get("REVIEW_OUTPUT_DIR") or config.OUTPUT_DIR)
+    domain_profile = classify_dataset(input_path)
+    clinical_mode = force_mode == "clinical"
+
     try:
-        print_stage("STEP 1/7", "Loading clinical records with schema validation")
-        records = load_records(spark, config.INPUT_PATH)
-        print(f"  Data rows ingested: {records.count()}")
-
-        print_stage("STEP 2/7", "Running quality checks")
-        use_legacy = rule_config is None
-        if use_legacy:
-            flagged_dataframe = run_checks_dataframe(records)
-            print(f"  DataFrame-flagged records (legacy clinical rules): {flagged_dataframe.count()}")
+        print_stage("START", "Initializing Spark session")
+        if force_mode == "configurable" or rule_config:
+            records = load_generic_records(spark, input_path)
+            clinical_mode = False
         else:
-            engine = ConfigurableQualityEngine(rule_config)
-            flagged_dataframe = engine.run(records)
-            print(f"  Records flagged (configurable rules): {flagged_dataframe.count()}")
+            preview = spark.read.option("header", True).csv(input_path)
+            clinical_mode = looks_like_clinical_schema(preview.columns)
+            records = load_records(spark, input_path) if clinical_mode else load_generic_records(spark, input_path)
 
-        if use_legacy:
-            print_stage("STEP 3/7", "Running Spark SQL quality checks")
-            flagged_sql = run_checks_sql(spark, records, os.path.join(config.SQL_DIR, "quality_checks.sql"))
-            print(f"  SQL-flagged records: {flagged_sql.count()}")
-
-            print_stage("STEP 4/7", "Cross-validating DataFrame and SQL results")
-            cross_validate(flagged_dataframe, flagged_sql)
-            print("  Validation passed: both rule sets agree on flagged identifiers")
-            
-            # Use legacy results
-            scored_input = flagged_dataframe
-            next_phase = 5
-        else:
-            # Skip SQL validation for configurable mode, go straight to severity
-            next_phase = 5
-            scored_input = flagged_dataframe
-
-        print_stage(f"STEP {next_phase}/7", "Assigning severity scores")
-        scored = add_severity(scored_input)
-        print(f"  Severity-scored rows: {scored.count()}")
-
-        print_stage(f"STEP {next_phase+1}/7", "Drafting reviewer query text")
-        flagged_with_query = add_drafted_queries(scored)
-        print(f"  Query drafts generated: {flagged_with_query.count()}")
-
-        print_stage(f"STEP {next_phase+2}/7", "Building summary report and writing final outputs")
-        summary = build_summary(spark, flagged_with_query, os.path.join(config.SQL_DIR, "summary_report.sql"))
         total = records.count()
+        print(f"  Data rows ingested: {total}")
+        print(f"  Columns detected: {', '.join(records.columns)}")
+
+        print_stage("CHECKS", "Running quality checks")
+        if clinical_mode and not rule_config:
+            flagged = run_checks_dataframe(records)
+            print(f"  DataFrame flagged records: {flagged.count()}")
+
+            print_stage("SQL", "Cross-validating with Spark SQL")
+            flagged_sql = run_checks_sql(spark, records, str(Path(config.SQL_DIR) / "quality_checks.sql"))
+            cross_validate(flagged, flagged_sql)
+            print("  Validation passed: PySpark DataFrame checks match Spark SQL checks")
+        else:
+            if not rule_config:
+                mapped_domain = "clinical" if domain_profile["domain"] == "clinical" else domain_profile["domain"]
+                rule_config = RuleTemplates.get_template(mapped_domain)["rules"]
+                print(f"  Auto-selected template: {mapped_domain} (confidence {domain_profile['confidence']})")
+            flagged = ConfigurableQualityEngine(rule_config).run(records)
+            print(f"  Configurable rules flagged records: {flagged.count()}")
+
+        print_stage("SCORING", "Assigning severity and drafting reviewer questions")
+        scored = add_severity(flagged)
+        flagged_with_query = add_drafted_queries(scored)
         n_flagged = flagged_with_query.count()
-        logger.info("Total records reviewed : %d", total)
-        logger.info("Flagged                : %d", n_flagged)
-        logger.info("Clear                  : %d", total - n_flagged)
+
+        summary = (
+            build_summary(spark, flagged_with_query, str(Path(config.SQL_DIR) / "summary_report.sql"))
+            if clinical_mode
+            else build_generic_summary(flagged_with_query)
+        )
 
         print(f"  Total records reviewed: {total}")
         print(f"  Flagged records: {n_flagged}")
-        print(f"  Clear records: {total - n_flagged}")
+        print(f"  Clear records: {max(total - n_flagged, 0)}")
 
-        print("\n=== Flagged records with drafted queries ===")
-        flagged_with_query.select(
-            "record_id", "patient_id", "source", "field_name", "issue_type", "severity", "drafted_query"
-        ).orderBy("severity").show(truncate=False)
-
-        print("=== Summary report (by source and severity) ===")
-        summary.show(truncate=False)
-
-        print_stage("EXPORT", "Writing flagged records to CSV for review export")
-        os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-        export_columns = [
-            "record_id", "patient_id", "source", "field_name", "value", "unit",
-            "expected_unit", "ref_low", "ref_high", "data_received_date",
-            "issue_type", "severity", "drafted_query"
-        ]
-        export_df = pd.DataFrame([
-            {k: v for k, v in row.asDict().items()}
-            for row in flagged_with_query.select(*export_columns).collect()
-        ])
-        export_path = os.path.join(config.OUTPUT_DIR, "flagged_records", "flagged_records.csv")
-        os.makedirs(os.path.dirname(export_path), exist_ok=True)
+        print_stage("EXPORT", "Writing review-ready outputs")
+        export_dir = output_dir / "flagged_records"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_df = pd.DataFrame([row.asDict() for row in normalize_flagged_for_export(flagged_with_query, clinical_mode).collect()])
+        export_path = export_dir / "flagged_records.csv"
         export_df.to_csv(export_path, index=False)
+
+        summary_df = pd.DataFrame([row.asDict() for row in summary.collect()])
+        summary_path = output_dir / "summary_report.csv"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        summary_df.to_csv(summary_path, index=False)
+
+        dashboard_path = save_dashboard(summary, flagged_with_query, str(output_dir))
+        metadata_path = output_dir / "run_metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "input_path": input_path,
+                    "detected_domain": domain_profile,
+                    "clinical_sql_validated": bool(clinical_mode and not rule_config),
+                    "total_records": total,
+                    "flagged_records": n_flagged,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         print(f"  CSV export written to: {export_path}")
-        logger.info("Flagged records written to %s", export_path)
+        print(f"  Summary written to: {summary_path}")
+        print(f"  Metadata written to: {metadata_path}")
+        print(f"  Dashboard saved to: {dashboard_path}")
+        print("[COMPLETE] Healthcare data review workflow finished successfully")
 
-        dashboard_path = save_dashboard(summary, flagged_with_query, config.OUTPUT_DIR)
-        print(f"\n[VISUALIZATION] Dashboard saved to: {dashboard_path}")
-        print("[COMPLETE] Clinical review workflow finished successfully")
-
+        return {
+            "input_path": input_path,
+            "clinical_mode": clinical_mode,
+            "total": total,
+            "flagged": n_flagged,
+            "clear": max(total - n_flagged, 0),
+            "export_path": str(export_path),
+            "summary_path": str(summary_path),
+            "metadata_path": str(metadata_path),
+            "dashboard_path": dashboard_path,
+        }
     finally:
         spark.stop()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run healthcare data quality review POC")
+    parser.add_argument("--input", default=None, help="CSV path to review")
+    parser.add_argument("--mode", choices=["auto", "clinical", "configurable"], default="auto")
+    parser.add_argument("--rules", default=None, help="Optional JSON file containing configurable rules")
+    return parser.parse_args()
+
+
+def main(rule_config: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+    return run_pipeline(rule_config=rule_config)
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    rules = None
+    if args.rules:
+        with open(args.rules, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+            rules = loaded.get("rules", loaded if isinstance(loaded, list) else [])
+    run_pipeline(dataset_path=args.input, rule_config=rules, force_mode=args.mode)
